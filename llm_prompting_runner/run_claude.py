@@ -14,7 +14,7 @@ import random
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -61,6 +61,37 @@ REWRITE_SYSTEM = (
     "7) Never output XML-like tags such as <bias> or </bias>."
 )
 
+CE_REWRITE_SYSTEM = (
+    "Task: Rewrite the biased input sentence to neutral point-of-view.\n"
+    "You are processing Wikipedia sentences known to contain biased language.\n"
+    "Your job is to neutralize the bias while preserving all factual content.\n"
+    "Rules:\n"
+    "1) Preserve factual meaning and named entities.\n"
+    "2) Remove subjective, loaded, inflammatory, or opinionated wording.\n"
+    "3) Tokens inside <bias>...</bias> are biased and MUST be removed or replaced with neutral alternatives. Do not keep any marked token unchanged.\n"
+    "4) Keep edits minimal and targeted; do not add new claims.\n"
+    "5) Keep dates, numbers, and named entities unchanged.\n"
+    "6) Output exactly one rewritten sentence.\n"
+    "7) Return only sentence text. No prefaces, no explanations, no bullets, no quotes, no tags."
+)
+
+# v2: treat bias tags as hints, not mandates -- fixes the "MUST-change * tagger-bug = delete factual content" issue on Claude.
+CE_REWRITE_SYSTEM_V2 = (
+    "Task: Rewrite the biased input sentence to neutral point-of-view.\n"
+    "You are processing Wikipedia sentences known to contain biased language.\n"
+    "Your job is to neutralize the bias while preserving all factual content.\n"
+    "Rules:\n"
+    "1) Preserve factual meaning and named entities.\n"
+    "2) Remove subjective, loaded, inflammatory, or opinionated wording.\n"
+    "3) Tokens inside <bias>...</bias> are hints indicating likely biased language. "
+    "Carefully review them and neutralize those that are truly subjective or opinionated. "
+    "If a marked token is factual or neutral in context, you may keep it unchanged.\n"
+    "4) Keep edits minimal and targeted; do not add new claims or remove factual content.\n"
+    "5) Keep dates, numbers, and named entities unchanged.\n"
+    "6) Output exactly one rewritten sentence.\n"
+    "7) Return only sentence text. No prefaces, no explanations, no bullets, no quotes, no tags."
+)
+
 MODEL_CONFIG: Dict[str, dict] = {
     "haiku": {
         "model_id": "haiku",
@@ -88,41 +119,71 @@ def build_claude_prompt(
     strategy: str,
     prepared_ex: PreparedExample,
     few_shots: List[Example],
-) -> str:
+    few_shot_tagged_sources: List[str] = None,
+) -> Tuple[str, str]:
     """
-    Flatten the system+user messages into a single string for ``claude -p``.
+    Return (system_prompt, user_message) for ``claude -p USER --system-prompt SYS``.
 
-    Claude CLI has no ``--system`` flag, so system content is embedded inline.
+    Separating system from user ensures Claude Code's default system prompt is fully
+    replaced, which prevents the CLI from interpreting the task meta-style.
     """
 
     if strategy in ("zero_shot", "npov", "self_refine"):
         # self_refine uses the same initial prompt; refinement is a separate call.
-        return REWRITE_SYSTEM + "\n\n" + prepared_ex.source
+        return REWRITE_SYSTEM, prepared_ex.source
 
     if strategy == "few_shot":
+        parts = ["Here are examples of bias rewriting:\n"]
+        for ex in few_shots:
+            parts.append(f"Biased: {ex.source}\nNeutral: {ex.target}\n")
+        parts.append(
+            f"Now rewrite the following biased sentence. "
+            f"Return ONLY the rewritten sentence, nothing else:\n{prepared_ex.source}"
+        )
+        return REWRITE_SYSTEM, "\n".join(parts)
+
+    if strategy == "few_shot_teammate":
+        # Exact replica of teammate's format: system prompt embedded in user message,
+        # "Original:" label, "Now rewrite:" ending. No --system-prompt flag.
         parts = [REWRITE_SYSTEM, ""]
         for ex in few_shots:
             parts.append(f"Original: {ex.source}\nNeutral: {ex.target}\n")
         parts.append(f"Now rewrite:\n{prepared_ex.source}")
-        return "\n".join(parts)
+        return None, "\n".join(parts)
 
     if strategy == "with_bias_tags":
         bias_instruction = (
-            "Rewrite to neutral language while preserving factual meaning. "
             "Tokens inside <bias>...</bias> are likely biased and must be neutralized first. "
             "The tags are hints only; do not output any tags. "
             "Do not add new facts. Return exactly one sentence."
         )
-        return (
-            REWRITE_SYSTEM
-            + "\n\n"
-            + bias_instruction
-            + "\n\n"
-            + f"Sentence: {prepared_ex.tagged_source_for_prompt}"
+        system = REWRITE_SYSTEM + "\n" + bias_instruction
+        return system, (
+            f"Rewrite the following sentence to be neutral. "
+            f"Return ONLY the rewritten sentence:\n{prepared_ex.tagged_source_for_prompt}"
         )
 
-    # Fallback: treat unknown strategy same as zero_shot.
-    return REWRITE_SYSTEM + "\n\n" + prepared_ex.source
+    if strategy in ("context_enriched", "context_enriched_v2"):
+        # Few-shot examples with bias tags + explicit instruction (not completion-style).
+        # Conversational -p mode needs a clear imperative at the end, not "Output:" blank.
+        # v2 uses a softened system prompt that treats bias tags as hints, not mandates.
+        sys_prompt = CE_REWRITE_SYSTEM_V2 if strategy == "context_enriched_v2" else CE_REWRITE_SYSTEM
+        parts = ["Here are examples of bias rewriting:\n"]
+        for i, ex in enumerate(few_shots):
+            tagged_src = (
+                few_shot_tagged_sources[i]
+                if few_shot_tagged_sources and i < len(few_shot_tagged_sources)
+                else ex.source
+            )
+            parts.append(f"Biased: {tagged_src}\nNeutral: {ex.target}\n")
+        parts.append(
+            f"Now rewrite the following biased sentence. "
+            f"Return ONLY the rewritten sentence, nothing else:\n{prepared_ex.tagged_source_for_prompt}"
+        )
+        return sys_prompt, "\n".join(parts)
+
+    # Fallback
+    return REWRITE_SYSTEM, prepared_ex.source
 
 
 # ---------------------------------------------------------------------------
@@ -130,20 +191,56 @@ def build_claude_prompt(
 # ---------------------------------------------------------------------------
 
 
-def call_claude(prompt: str, model: str, retries: int = 3) -> str:
-    """Call the ``claude`` CLI and return the stripped stdout."""
+def call_claude(
+    user_message: str, model: str, retries: int = 3, system_prompt: str = None
+) -> str:
+    """Call the ``claude`` CLI and return the stripped stdout.
+
+    On Windows, multi-line prompt strings cannot be safely passed as command-line
+    arguments through cmd.exe (literal newlines terminate argument parsing).
+    We pass prompts via environment variables and read them from PowerShell, which
+    handles multi-line strings natively without any parsing issues.
+    """
     delay = 5.0
-    for attempt in range(retries):
-        result = None
-        try:
-            result = subprocess.run(
-                ["claude", "-p", prompt, "--model", model],
+
+    if os.name == "nt":
+        # PS7 reads prompts from env vars — avoids Windows command-line newline issue.
+        _PS7 = "C:/Program Files/PowerShell/7/pwsh.exe"
+        if system_prompt:
+            ps_cmd = (
+                "claude -p $env:_CLAUDE_PROMPT "
+                "--system-prompt $env:_CLAUDE_SYS "
+                f"--model {model}"
+            )
+        else:
+            ps_cmd = f"claude -p $env:_CLAUDE_PROMPT --model {model}"
+
+        def _run():
+            env = dict(_SUBPROCESS_ENV)
+            env["_CLAUDE_PROMPT"] = user_message
+            if system_prompt:
+                env["_CLAUDE_SYS"] = system_prompt
+            return subprocess.run(
+                [_PS7, "-NonInteractive", "-NoProfile", "-Command", ps_cmd],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 timeout=120,
+                env=env,
+            )
+    else:
+        def _run():
+            cmd = ["claude", "-p", user_message, "--model", model]
+            if system_prompt:
+                cmd = ["claude", "-p", user_message, "--system-prompt", system_prompt, "--model", model]
+            return subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", timeout=120,
                 env=_SUBPROCESS_ENV,
             )
+
+    for attempt in range(retries):
+        try:
+            result = _run()
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
         except subprocess.TimeoutExpired:
@@ -253,6 +350,12 @@ def run(args: argparse.Namespace) -> None:
     sem_model = SentenceTransformer("paraphrase-MiniLM-L6-v2")
     wp_tokenizer = WordPieceAdapter(Path(args.bert_vocab).resolve())
 
+    # Pre-tag few-shot sources for context_enriched strategy.
+    few_shot_tagged_sources: List[str] = []
+    for fs_ex in few_shots:
+        fs_tags = tagger.predict_tags(fs_ex.source_wnc_tokens)
+        few_shot_tagged_sources.append(wrap_bias_spans(fs_ex.source_wnc_tokens, fs_tags))
+
     all_prepared: List[PreparedExample] = []
     for ex in all_eval_rows:
         src_tokens = ex.source_wnc_tokens
@@ -341,8 +444,12 @@ def run(args: argparse.Namespace) -> None:
             with pred_path.open(file_mode, encoding="utf-8") as fout:
 
                 def generate_one(ex: PreparedExample) -> Tuple[PreparedExample, str]:
-                    prompt = build_claude_prompt(strategy, ex, few_shots)
-                    pred_local = call_claude(prompt, model_id, retries=args.retries)
+                    sys_prompt, user_msg = build_claude_prompt(
+                        strategy, ex, few_shots, few_shot_tagged_sources
+                    )
+                    pred_local = call_claude(
+                        user_msg, model_id, retries=args.retries, system_prompt=sys_prompt
+                    )
                     if not pred_local:
                         pred_local = ex.source
 
@@ -355,8 +462,9 @@ def run(args: argparse.Namespace) -> None:
 
                     # Quality retry once.
                     if is_low_quality_rewrite(pred_local, ex.source):
-                        prompt2 = build_claude_prompt(strategy, ex, few_shots)
-                        retry_text = call_claude(prompt2, model_id, retries=args.retries)
+                        retry_text = call_claude(
+                            user_msg, model_id, retries=args.retries, system_prompt=sys_prompt
+                        )
                         if retry_text:
                             retry_text = normalize_prediction(retry_text, ex.source)
                             if not is_low_quality_rewrite(retry_text, ex.source):
@@ -422,13 +530,12 @@ def run(args: argparse.Namespace) -> None:
                 if todo_rows:
                     if args.parallel_workers > 1:
                         with ThreadPoolExecutor(max_workers=args.parallel_workers) as pool:
-                            for ex, pred in tqdm(
-                                pool.map(generate_one, todo_rows),
-                                total=len(todo_rows),
-                                desc=f"{dry_prefix}{run_name}",
-                                leave=True,
-                            ):
-                                process_result(ex, pred)
+                            futures = {pool.submit(generate_one, row): row for row in todo_rows}
+                            with tqdm(total=len(todo_rows), desc=f"{dry_prefix}{run_name}", leave=True) as pbar:
+                                for fut in as_completed(futures):
+                                    ex, pred = fut.result()
+                                    process_result(ex, pred)
+                                    pbar.update(1)
                     else:
                         for ex in tqdm(
                             todo_rows,
@@ -539,7 +646,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tagger_ckpt",
-        default=str(REPO_ROOT / "neutralizing-biased-phrase" / "src" / "train_tagging" / "biased_phrase_tagger.ckpt"),
+        default=str(SCRIPT_DIR / "train_tagging" / "biased_phrase_tagger.ckpt"),
     )
     parser.add_argument(
         "--bert_vocab",
@@ -556,7 +663,7 @@ def parse_args() -> argparse.Namespace:
         "--strategies",
         nargs="+",
         default=None,
-        choices=["zero_shot", "few_shot", "with_bias_tags", "npov", "self_refine"],
+        choices=["zero_shot", "few_shot", "few_shot_teammate", "with_bias_tags", "npov", "self_refine", "context_enriched", "context_enriched_v2"],
         help="Override per-model default strategies. If omitted, uses MODEL_CONFIG defaults.",
     )
     parser.add_argument(

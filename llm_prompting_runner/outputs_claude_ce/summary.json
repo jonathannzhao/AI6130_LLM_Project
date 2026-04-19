@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.5799,
+    "Token-Level Accuracy": 0.032,
+    "SemanticSimilarity": 0.9285,
+    "BERTScoreF1": 0.7532,
+    "METEOR": 0.8294,
+    "BiasRetentionRate": 0.9413,
+    "BiasPhraseRetentionRate": 0.7836,
+    "OverEditRate": 0.0936,
+    "NoBiasReductionCount": 166,
+    "n": 500,
+    "model": "sonnet",
+    "strategy": "context_enriched"
+  }
+]

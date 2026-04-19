@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.5737,
+    "Token-Level Accuracy": 0.1,
+    "SemanticSimilarity": 0.9558,
+    "BERTScoreF1": 0.7337,
+    "METEOR": 0.8653,
+    "BiasRetentionRate": 0.964,
+    "BiasPhraseRetentionRate": 0.8476,
+    "OverEditRate": 0.0908,
+    "NoBiasReductionCount": 6,
+    "n": 10,
+    "model": "haiku",
+    "strategy": "few_shot"
+  }
+]

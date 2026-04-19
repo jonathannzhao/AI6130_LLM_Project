@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.6346,
+    "Token-Level Accuracy": 0.0325,
+    "SemanticSimilarity": 0.9296,
+    "BERTScoreF1": 0.7745,
+    "METEOR": 0.8503,
+    "BiasRetentionRate": 0.9691,
+    "BiasPhraseRetentionRate": 0.8901,
+    "OverEditRate": 0.0612,
+    "n": 2000,
+    "model": "qwen/qwen-2.5-7b-instruct",
+    "strategy": "context_enriched",
+    "NoBiasReductionCount": 1095
+  }
+]

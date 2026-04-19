@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.6087,
+    "Token-Level Accuracy": 0.019,
+    "SemanticSimilarity": 0.9315,
+    "BERTScoreF1": 0.7464,
+    "METEOR": 0.8617,
+    "BiasRetentionRate": 0.9736,
+    "BiasPhraseRetentionRate": 0.8947,
+    "OverEditRate": 0.0632,
+    "n": 2000,
+    "model": "meta-llama/llama-3.1-8b-instruct",
+    "strategy": "context_enriched",
+    "NoBiasReductionCount": 1144
+  }
+]

@@ -1,0 +1,2 @@
+BLEU,Token-Level Accuracy,SemanticSimilarity,BERTScoreF1,METEOR,BiasRetentionRate,BiasPhraseRetentionRate,OverEditRate,NoBiasReductionCount,n,model,strategy
+0.6533,0.05,0.9498,0.7898,0.8771,0.9558,0.8656,0.0477,53,100,sonnet,context_enriched_v2

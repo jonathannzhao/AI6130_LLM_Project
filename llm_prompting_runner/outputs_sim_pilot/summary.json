@@ -1,0 +1,30 @@
+[
+  {
+    "BLEU": 0.455,
+    "Token-Level Accuracy": 0.0,
+    "SemanticSimilarity": 0.9044,
+    "BERTScoreF1": 0.6945,
+    "METEOR": 0.6811,
+    "BiasRetentionRate": 0.9264,
+    "BiasPhraseRetentionRate": 0.6802,
+    "OverEditRate": 0.2509,
+    "n": 50,
+    "model": "deepseek/deepseek-chat-v3-0324",
+    "strategy": "context_enriched",
+    "NoBiasReductionCount": 18
+  },
+  {
+    "BLEU": 0.4621,
+    "Token-Level Accuracy": 0.02,
+    "SemanticSimilarity": 0.9137,
+    "BERTScoreF1": 0.7166,
+    "METEOR": 0.7004,
+    "BiasRetentionRate": 0.9247,
+    "BiasPhraseRetentionRate": 0.6935,
+    "OverEditRate": 0.2103,
+    "n": 50,
+    "model": "deepseek/deepseek-chat-v3-0324",
+    "strategy": "context_enriched_soft",
+    "NoBiasReductionCount": 20
+  }
+]

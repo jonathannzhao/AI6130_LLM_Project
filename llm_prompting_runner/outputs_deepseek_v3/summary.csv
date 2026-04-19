@@ -1,0 +1,4 @@
+BLEU,Token-Level Accuracy,SemanticSimilarity,BERTScoreF1,METEOR,BiasRetentionRate,BiasPhraseRetentionRate,OverEditRate,n,model,strategy,NoBiasReductionCount
+0.4238,0.02,0.9136,0.6585,0.7649,0.9517,0.7583,0.1943,500,deepseek-v3.2,zero_shot,230
+0.3309,0.0,0.9007,0.6113,0.7193,0.9169,0.6735,0.234,500,deepseek-v3.2,with_bias_tags,157
+0.6239,0.044,0.9223,0.7932,0.7841,0.9151,0.7462,0.1287,500,deepseek-v3.2,context_enriched,151

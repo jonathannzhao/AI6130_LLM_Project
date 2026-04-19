@@ -7,11 +7,11 @@ import re
 import threading
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -43,6 +43,25 @@ except Exception:
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# Global token/cost tracking (thread-safe)
+_token_stats: Dict[str, int] = {"input": 0, "output": 0}
+_stats_lock = threading.Lock()
+
+# Reasoning budget: if > 0, passed as reasoning.max_tokens to OpenRouter
+_reasoning_budget: int = 0
+
+# Budget watchdog (real-time cost monitoring)
+_budget_exceeded: bool = False
+_budget_lock = threading.Lock()
+_cost_baseline: float = 0.0          # key usage (USD) at experiment start
+_samples_done_budget: int = 0        # how many samples completed so far
+_est_cost_per_sample: float = 0.0    # user-provided estimate (0 = disabled)
+_max_budget: float = 0.0             # absolute USD cap (0 = disabled)
+_budget_api_key: str = ""
+_budget_api_base: str = ""
+_BUDGET_CHECK_EVERY: int = 10        # check after every N completions
+_BUDGET_TOLERANCE: float = 0.30      # allow up to 30% over estimate
 REPO_ROOT = SCRIPT_DIR.parent
 SRC_DIR = REPO_ROOT / "neutralizing-biased-phrase" / "src"
 BERT_VOCAB_PATH = SRC_DIR / "bias_data" / "bert.vocab"
@@ -272,6 +291,7 @@ def build_messages(
     strategy: str,
     prepared_ex: PreparedExample,
     few_shots: List[Example],
+    few_shot_tagged_sources: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     rewrite_system = (
         "Task: Rewrite the biased input sentence to neutral point-of-view.\n"
@@ -298,6 +318,46 @@ def build_messages(
         )
         return [{"role": "system", "content": rewrite_system}, {"role": "user", "content": user}]
 
+    if strategy in ("context_enriched", "context_enriched_soft", "context_enriched_constrained"):
+        if strategy == "context_enriched_soft":
+            rule3 = (
+                "3) Tokens inside <bias>...</bias> are likely biased. Prefer replacing them with neutral alternatives. "
+                "If surrounding words need grammatical adjustment, make only the smallest possible additional change.\n"
+            )
+        elif strategy == "context_enriched_constrained":
+            rule3 = (
+                "3) ONLY change the words inside <bias>...</bias> tags. Replace each biased word or phrase with a "
+                "neutral equivalent. Do NOT change, add, or remove any other words in the sentence.\n"
+            )
+        else:
+            rule3 = (
+                "3) Tokens inside <bias>...</bias> are biased and must be removed or replaced with neutral alternatives. "
+                "Do not keep any marked token unchanged.\n"
+            )
+        ce_system = (
+            "Task: Rewrite the biased input sentence to neutral point-of-view.\n"
+            "You are processing Wikipedia sentences that are known to contain biased language. "
+            "Your job is to neutralize the bias while preserving all factual content.\n"
+            "Rules:\n"
+            "1) Preserve factual meaning and named entities.\n"
+            "2) Remove subjective, loaded, inflammatory, or opinionated wording.\n"
+            + rule3 +
+            "4) Keep edits minimal and targeted; do not add new claims.\n"
+            "5) Keep dates, numbers, and named entities unchanged unless grammar requires it.\n"
+            "6) Output exactly one rewritten sentence.\n"
+            "7) Return only sentence text. No prefaces, no explanations, no bullets, no quotes, no tags."
+        )
+        messages = [{"role": "system", "content": ce_system}]
+        tagged_sources = few_shot_tagged_sources or []
+        for i, ex in enumerate(few_shots):
+            if i < len(tagged_sources):
+                messages.append({"role": "user", "content": f"Sentence: {tagged_sources[i]}"})
+            else:
+                messages.append({"role": "user", "content": ex.source})
+            messages.append({"role": "assistant", "content": ex.target})
+        messages.append({"role": "user", "content": f"Sentence: {prepared_ex.tagged_source_for_prompt}"})
+        return messages
+
     if strategy == "few_shot":
         messages = [
             {
@@ -311,6 +371,14 @@ def build_messages(
         messages.append({"role": "user", "content": prepared_ex.source})
         return messages
 
+    if strategy == "few_shot_flat":
+        parts = [rewrite_system, ""]
+        for ex in few_shots:
+            parts.append(f"Original: {ex.source}\nNeutral: {ex.target}\n")
+        parts.append(f"Now rewrite:\n{prepared_ex.source}")
+        flat_prompt = "\n".join(parts)
+        return [{"role": "user", "content": flat_prompt}]
+
     return [
         {
             "role": "system",
@@ -318,6 +386,55 @@ def build_messages(
         },
         {"role": "user", "content": prepared_ex.source},
     ]
+
+
+def get_key_usage(api_key: str, api_base: str) -> float:
+    """Query OpenRouter for cumulative USD usage of this API key."""
+    import requests as _requests
+    resp = _requests.get(
+        f"{api_base}/key",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return float(resp.json()["data"]["usage"])
+
+
+def check_budget_watchdog() -> None:
+    """Called every _BUDGET_CHECK_EVERY completions. Sets _budget_exceeded if cost overruns."""
+    global _budget_exceeded
+    if _est_cost_per_sample <= 0 or not _budget_api_key:
+        return
+    # Read n outside the lock to avoid holding lock during HTTP call
+    with _budget_lock:
+        n = _samples_done_budget
+    if n == 0:
+        return
+    try:
+        current_usage = get_key_usage(_budget_api_key, _budget_api_base)
+    except Exception as e:
+        print(f"\n[BUDGET] WARNING: Could not query key usage: {e}")
+        return
+    actual_per_sample = (current_usage - _cost_baseline) / n
+    limit = _est_cost_per_sample * (1 + _BUDGET_TOLERANCE)
+    status = (
+        f"[BUDGET] n={n}  baseline=${_cost_baseline:.4f}  current=${current_usage:.4f}"
+        f"  actual/sample=${actual_per_sample:.5f}  estimated/sample=${_est_cost_per_sample:.5f}"
+        f"  limit=${limit:.5f}"
+    )
+    print(f"\n{status}")
+    total_spent = current_usage - _cost_baseline
+    if _max_budget > 0 and total_spent >= _max_budget:
+        _budget_exceeded = True
+        print(
+            f"[BUDGET CAP HIT] spent=${total_spent:.4f} >= cap=${_max_budget:.2f}. STOPPING."
+        )
+    elif actual_per_sample > limit:
+        _budget_exceeded = True
+        print(
+            f"[BUDGET EXCEEDED] actual/sample=${actual_per_sample:.5f} > limit=${limit:.5f}"
+            f" (>{_BUDGET_TOLERANCE*100:.0f}% over estimate). STOPPING."
+        )
 
 
 def call_openai_chat(
@@ -329,18 +446,36 @@ def call_openai_chat(
     request_timeout: float,
     allow_fallbacks: bool,
 ) -> str:
-    extra_body = {"provider": {"allow_fallbacks": allow_fallbacks}}
+    if _budget_exceeded:
+        raise RuntimeError("[BUDGET EXCEEDED] Refusing new API call.")
+    # max_tokens <= 0 means no limit (do not pass the parameter)
+    # stream=False: for thinking models (e.g. qwen3.5-flash), thinking tokens go to
+    # message.reasoning separately; max_tokens only limits the visible content.
+    extra_body: Dict = {"provider": {"allow_fallbacks": allow_fallbacks}}
+    if _reasoning_budget > 0:
+        extra_body["reasoning"] = {"max_tokens": _reasoning_budget}
+    elif _reasoning_budget == -1:
+        extra_body["reasoning"] = {"effort": "none"}
 
-    resp = client.chat.completions.create(
+    create_kwargs: Dict = dict(
         model=model,
         messages=messages,
         temperature=temperature,
-        max_tokens=max_tokens,
         timeout=request_timeout,
         extra_body=extra_body,
     )
-    content = resp.choices[0].message.content
-    return (content or "").strip()
+    if max_tokens > 0:
+        create_kwargs["max_tokens"] = max_tokens
+
+    resp = client.chat.completions.create(**create_kwargs)
+    if not resp.choices:
+        raise RuntimeError(f"API returned empty choices (model={model}): {resp}")
+    content = resp.choices[0].message.content or ""
+    if resp.usage is not None:
+        with _stats_lock:
+            _token_stats["input"] += resp.usage.prompt_tokens or 0
+            _token_stats["output"] += resp.usage.completion_tokens or 0
+    return content.strip()
 
 
 def call_openai_with_retry(
@@ -570,7 +705,20 @@ def run(args: argparse.Namespace) -> None:
     few_shots = few_pool[: args.few_shot_k]
 
     tagger = LocalBiasTagger(tagger_ckpt)
+
+    # Pre-compute tagged sources for few-shot examples (used by context_enriched strategy)
+    few_shot_tagged_sources: List[str] = []
+    for ex in few_shots:
+        fs_tags = tagger.predict_tags(ex.source_wnc_tokens)
+        few_shot_tagged_sources.append(wrap_bias_spans(ex.source_wnc_tokens, fs_tags))
     sem_model = SentenceTransformer("paraphrase-MiniLM-L6-v2")
+
+    # Semantic similarity few-shot: pre-compute embeddings for pool + eval rows
+    # (populated after prepared_eval_rows is built below)
+    few_pool_embeddings = None
+    few_pool_tagged_sources_all: List[str] = []
+    eval_embeddings = None
+    eval_emb_map: Dict[str, int] = {}
     wp_tokenizer = WordPieceAdapter(Path(args.bert_vocab).resolve())
     api_key = load_api_key(args)
 
@@ -609,6 +757,27 @@ def run(args: argparse.Namespace) -> None:
             "Tagger/tokenization input is likely incompatible."
         )
 
+    if args.sim_few_shot:
+        # Limit pool size to avoid encoding all 160K+ training examples.
+        sim_pool = few_pool[: args.sim_pool_size] if args.sim_pool_size > 0 else few_pool
+        print(f"[sim_few_shot] Pre-computing embeddings. Pool={len(sim_pool)}, Eval={len(prepared_eval_rows)}")
+        few_pool_sources = [ex.source for ex in sim_pool]
+        few_pool_embeddings = sem_model.encode(
+            few_pool_sources, convert_to_tensor=True, show_progress_bar=False
+        )
+        # Pre-compute tagged sources for sim_pool (safe: single-threaded, fast for 2000 examples)
+        for ex in sim_pool:
+            fs_tags = tagger.predict_tags(ex.source_wnc_tokens)
+            few_pool_tagged_sources_all.append(wrap_bias_spans(ex.source_wnc_tokens, fs_tags))
+        # Replace few_pool with the limited pool for generate_one to reference
+        few_pool = sim_pool
+        eval_sources = [ex.source for ex in prepared_eval_rows]
+        eval_embeddings = sem_model.encode(
+            eval_sources, convert_to_tensor=True, show_progress_bar=False
+        )
+        eval_emb_map = {ex.idx: i for i, ex in enumerate(prepared_eval_rows)}
+        print(f"[sim_few_shot] Done.")
+
     summary_rows = []
     for model_name in args.models:
         for strategy in args.strategies:
@@ -626,14 +795,29 @@ def run(args: argparse.Namespace) -> None:
             with pred_path.open("w", encoding="utf-8") as fout:
                 def generate_one(ex: PreparedExample) -> Tuple[PreparedExample, str]:
                     if not hasattr(thread_state, "client"):
-                        thread_state.client = OpenAI(api_key=api_key, base_url=args.api_base)
+                        thread_state.client = OpenAI(
+                            api_key=api_key,
+                            base_url=args.api_base,
+                            default_headers={
+                                "HTTP-Referer": "https://github.com/ntu-ai6130",
+                                "X-Title": "AI6130-bias-neutralization",
+                            },
+                        )
                     local_client = thread_state.client
                     quality_retries = max(0, args.quality_retry_attempts)
                     if args.quality_retry_once:
                         quality_retries = max(quality_retries, 1)
                     pred_local = ex.source
                     for retry_idx in range(quality_retries + 1):
-                        msgs = build_messages(strategy, ex, few_shots)
+                        if args.sim_few_shot:
+                            ex_i = eval_emb_map[ex.idx]
+                            scores = util.cos_sim(eval_embeddings[ex_i : ex_i + 1], few_pool_embeddings)[0]
+                            top_k = scores.argsort(descending=True)[: args.few_shot_k].tolist()
+                            sim_shots = [few_pool[i] for i in top_k]
+                            sim_tagged = [few_pool_tagged_sources_all[i] for i in top_k]
+                            msgs = build_messages(strategy, ex, sim_shots, sim_tagged)
+                        else:
+                            msgs = build_messages(strategy, ex, few_shots, few_shot_tagged_sources)
                         if retry_idx > 0:
                             msgs = msgs + [
                                 {
@@ -644,16 +828,19 @@ def run(args: argparse.Namespace) -> None:
                                     ),
                                 }
                             ]
-                        pred_local = call_openai_with_retry(
-                            client=local_client,
-                            model=model_name,
-                            messages=msgs,
-                            temperature=args.temperature,
-                            max_tokens=args.max_tokens,
-                            request_timeout=args.request_timeout,
-                            allow_fallbacks=args.allow_fallbacks,
-                            retries=args.retries,
-                        )
+                        try:
+                            pred_local = call_openai_with_retry(
+                                client=local_client,
+                                model=model_name,
+                                messages=msgs,
+                                temperature=args.temperature,
+                                max_tokens=args.max_tokens,
+                                request_timeout=args.request_timeout,
+                                allow_fallbacks=args.allow_fallbacks,
+                                retries=args.retries,
+                            )
+                        except RuntimeError:
+                            break  # fallback to ex.source (set above)
                         if strategy == "self_refine":
                             pred_local = refine_once(
                                 client=local_client,
@@ -725,16 +912,32 @@ def run(args: argparse.Namespace) -> None:
                         )
                         + "\n"
                     )
+                    fout.flush()
+
+                def process_result_with_budget(ex: "PreparedExample", pred: str) -> None:
+                    global _samples_done_budget
+                    process_result(ex, pred)
+                    with _budget_lock:
+                        _samples_done_budget += 1
+                        n = _samples_done_budget
+                    if n % _BUDGET_CHECK_EVERY == 0:
+                        check_budget_watchdog()
 
                 if args.parallel_requests > 1:
                     with ThreadPoolExecutor(max_workers=args.parallel_requests) as pool:
-                        for ex, pred in tqdm(
-                            pool.map(generate_one, prepared_eval_rows),
+                        futures = {pool.submit(generate_one, row): row for row in prepared_eval_rows}
+                        for fut in tqdm(
+                            as_completed(futures),
                             total=len(prepared_eval_rows),
                             desc=run_name,
                             leave=True,
                         ):
-                            process_result(ex, pred)
+                            if _budget_exceeded:
+                                for f in futures:
+                                    f.cancel()
+                                print(f"\n[BUDGET] Stopped early. {len(preds)} samples saved.")
+                                break
+                            process_result_with_budget(*fut.result())
                 else:
                     for ex, pred in tqdm(
                         map(generate_one, prepared_eval_rows),
@@ -742,7 +945,7 @@ def run(args: argparse.Namespace) -> None:
                         desc=run_name,
                         leave=True,
                     ):
-                        process_result(ex, pred)
+                        process_result_with_budget(ex, pred)
 
             metrics = compute_metrics(refs, preds, sem_model)
             metrics["BiasRetentionRate"] = round(
@@ -752,7 +955,7 @@ def run(args: argparse.Namespace) -> None:
                 float(np.mean(bias_phrase_retention_vals)) if bias_phrase_retention_vals else 0.0, 4
             )
             metrics["OverEditRate"] = round(float(np.mean(over_edit_vals)) if over_edit_vals else 0.0, 4)
-            metrics["n"] = len(eval_rows)
+            metrics["n"] = len(preds)
             metrics["model"] = model_name
             metrics["strategy"] = strategy
             metrics["NoBiasReductionCount"] = no_bias_reduction_count
@@ -771,6 +974,13 @@ def run(args: argparse.Namespace) -> None:
 
     print(f"\nSaved summary: {summary_json}")
     print(f"Saved summary: {summary_csv}")
+
+    # Token usage report
+    inp = _token_stats["input"]
+    out = _token_stats["output"]
+    total = inp + out
+    print(f"\n[TOKEN USAGE] input={inp:,}  output={out:,}  total={total:,}")
+    print(f"[NOTE] Cost depends on model pricing; check OpenRouter dashboard for actual charges.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -801,12 +1011,31 @@ def parse_args() -> argparse.Namespace:
         "--strategies",
         nargs="+",
         default=["zero_shot", "few_shot", "with_bias_tags", "npov", "self_refine"],
-        choices=["zero_shot", "few_shot", "with_bias_tags", "npov", "self_refine"],
+        choices=["zero_shot", "few_shot", "few_shot_flat", "with_bias_tags", "npov", "self_refine", "context_enriched", "context_enriched_soft", "context_enriched_constrained"],
+    )
+    parser.add_argument(
+        "--sim_few_shot",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Use semantic similarity to select per-example few-shot demonstrations "
+            "(top-k most similar from the training pool). "
+            "Default: fixed random k shots (seed-based)."
+        ),
+    )
+    parser.add_argument(
+        "--sim_pool_size",
+        type=int,
+        default=2000,
+        help=(
+            "Max number of training pool examples to use for similarity search "
+            "(0 = use all). Default: 2000. Larger values are slower but may improve quality."
+        ),
     )
     parser.add_argument("--few_shot_k", type=int, default=3)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max_tokens", type=int, default=220)
-    parser.add_argument("--api_base", default="https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+    parser.add_argument("--api_base", default="https://openrouter.ai/api/v1")
     parser.add_argument("--api_key", default="")
     parser.add_argument("--api_key_file", default=str(SCRIPT_DIR / ".local.env"))
     parser.add_argument("--bert_vocab", default=str(BERT_VOCAB_PATH))
@@ -824,9 +1053,51 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--quality_retry_attempts", type=int, default=1)
     parser.add_argument("--retries", type=int, default=3)
+    parser.add_argument(
+        "--reasoning_budget",
+        type=int,
+        default=0,
+        help="Max reasoning tokens for thinking models (0 = no limit). Passed as reasoning.max_tokens to OpenRouter.",
+    )
+    parser.add_argument(
+        "--estimated_cost_per_sample",
+        type=float,
+        default=0.0,
+        help=(
+            "Expected USD cost per sample (from estimate_budget.py). "
+            "If > 0, actual cost is checked every 10 samples via OpenRouter /api/v1/key. "
+            "Experiment stops if actual/sample exceeds this by >30%%."
+        ),
+    )
+    parser.add_argument(
+        "--max_budget",
+        type=float,
+        default=0.0,
+        help="Absolute USD cap. Experiment stops immediately when total spend reaches this.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    _reasoning_budget = args.reasoning_budget
+    _max_budget = args.max_budget
+    if args.estimated_cost_per_sample > 0 or args.max_budget > 0:
+        # Resolve API key (same logic as run())
+        _api_key_resolved = args.api_key
+        if not _api_key_resolved and Path(args.api_key_file).exists():
+            for line in Path(args.api_key_file).read_text().splitlines():
+                if line.startswith("OPENROUTER_API_KEY="):
+                    _api_key_resolved = line.split("=", 1)[1].strip()
+                    break
+        _est_cost_per_sample = args.estimated_cost_per_sample
+        _budget_api_key = _api_key_resolved
+        _budget_api_base = args.api_base
+        try:
+            _cost_baseline = get_key_usage(_budget_api_key, _budget_api_base)
+            cap_msg = f"  Cap=${_max_budget:.2f}" if _max_budget > 0 else ""
+            print(f"[BUDGET] Watchdog active. Baseline usage=${_cost_baseline:.4f} USD  Estimate=${_est_cost_per_sample:.5f}/sample  Limit=+{_BUDGET_TOLERANCE*100:.0f}%{cap_msg}")
+        except Exception as e:
+            print(f"[BUDGET] WARNING: Could not fetch baseline usage: {e}. Watchdog disabled.")
+            _est_cost_per_sample = 0.0
     run(args)

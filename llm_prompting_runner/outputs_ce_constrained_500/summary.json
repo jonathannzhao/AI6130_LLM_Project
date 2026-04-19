@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.5311,
+    "Token-Level Accuracy": 0.02,
+    "SemanticSimilarity": 0.9062,
+    "BERTScoreF1": 0.7516,
+    "METEOR": 0.7452,
+    "BiasRetentionRate": 0.9035,
+    "BiasPhraseRetentionRate": 0.6758,
+    "OverEditRate": 0.1746,
+    "n": 500,
+    "model": "deepseek/deepseek-chat-v3-0324",
+    "strategy": "context_enriched_constrained",
+    "NoBiasReductionCount": 113
+  }
+]

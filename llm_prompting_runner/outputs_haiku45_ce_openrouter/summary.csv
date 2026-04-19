@@ -1,0 +1,2 @@
+BLEU,Token-Level Accuracy,SemanticSimilarity,BERTScoreF1,METEOR,BiasRetentionRate,BiasPhraseRetentionRate,OverEditRate,n,model,strategy,NoBiasReductionCount
+0.443,0.014,0.9135,0.681,0.757,0.9235,0.7147,0.1789,500,anthropic/claude-haiku-4.5,context_enriched,166

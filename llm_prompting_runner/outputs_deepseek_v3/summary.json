@@ -1,0 +1,44 @@
+[
+  {
+    "BLEU": 0.4238,
+    "Token-Level Accuracy": 0.02,
+    "SemanticSimilarity": 0.9136,
+    "BERTScoreF1": 0.6585,
+    "METEOR": 0.7649,
+    "BiasRetentionRate": 0.9517,
+    "BiasPhraseRetentionRate": 0.7583,
+    "OverEditRate": 0.1943,
+    "n": 500,
+    "model": "deepseek-v3.2",
+    "strategy": "zero_shot",
+    "NoBiasReductionCount": 230
+  },
+  {
+    "BLEU": 0.3309,
+    "Token-Level Accuracy": 0.0,
+    "SemanticSimilarity": 0.9007,
+    "BERTScoreF1": 0.6113,
+    "METEOR": 0.7193,
+    "BiasRetentionRate": 0.9169,
+    "BiasPhraseRetentionRate": 0.6735,
+    "OverEditRate": 0.234,
+    "n": 500,
+    "model": "deepseek-v3.2",
+    "strategy": "with_bias_tags",
+    "NoBiasReductionCount": 157
+  },
+  {
+    "BLEU": 0.6239,
+    "Token-Level Accuracy": 0.044,
+    "SemanticSimilarity": 0.9223,
+    "BERTScoreF1": 0.7932,
+    "METEOR": 0.7841,
+    "BiasRetentionRate": 0.9151,
+    "BiasPhraseRetentionRate": 0.7462,
+    "OverEditRate": 0.1287,
+    "n": 500,
+    "model": "deepseek-v3.2",
+    "strategy": "context_enriched",
+    "NoBiasReductionCount": 151
+  }
+]

@@ -1,0 +1,22 @@
+# Secrets
+.local.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+tagging/__pycache__/
+
+# Logs
+*.log
+logs_*.txt
+outputs_*_run.log
+outputs_claude_ce_haiku.log
+outputs_claude_ce_sonnet.log
+
+# Scratch / test outputs
+outputs_test/
+outputs_test_nocot/
+outputs_test_nocot2/

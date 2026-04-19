@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.7272,
+    "Token-Level Accuracy": 0.104,
+    "SemanticSimilarity": 0.9369,
+    "BERTScoreF1": 0.8318,
+    "METEOR": 0.8455,
+    "BiasRetentionRate": 0.9612,
+    "BiasPhraseRetentionRate": 0.8389,
+    "OverEditRate": 0.083,
+    "n": 500,
+    "model": "deepseek/deepseek-v3.2",
+    "strategy": "few_shot",
+    "NoBiasReductionCount": 238
+  }
+]

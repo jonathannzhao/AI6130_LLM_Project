@@ -1,0 +1,2 @@
+BLEU,Token-Level Accuracy,SemanticSimilarity,BERTScoreF1,METEOR,BiasRetentionRate,BiasPhraseRetentionRate,OverEditRate,n,model,strategy,NoBiasReductionCount
+0.5121,0.0245,0.9371,0.7099,0.8641,0.9703,0.8944,0.0568,2000,qwen/qwen3.5-9b,context_enriched,1050

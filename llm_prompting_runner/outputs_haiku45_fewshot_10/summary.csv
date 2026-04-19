@@ -1,0 +1,2 @@
+BLEU,Token-Level Accuracy,SemanticSimilarity,BERTScoreF1,METEOR,BiasRetentionRate,BiasPhraseRetentionRate,OverEditRate,NoBiasReductionCount,n,model,strategy
+0.5737,0.1,0.9558,0.7337,0.8653,0.964,0.8476,0.0908,6,10,haiku,few_shot

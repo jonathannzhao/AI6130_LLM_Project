@@ -1,0 +1,16 @@
+[
+  {
+    "BLEU": 0.443,
+    "Token-Level Accuracy": 0.014,
+    "SemanticSimilarity": 0.9135,
+    "BERTScoreF1": 0.681,
+    "METEOR": 0.757,
+    "BiasRetentionRate": 0.9235,
+    "BiasPhraseRetentionRate": 0.7147,
+    "OverEditRate": 0.1789,
+    "n": 500,
+    "model": "anthropic/claude-haiku-4.5",
+    "strategy": "context_enriched",
+    "NoBiasReductionCount": 166
+  }
+]

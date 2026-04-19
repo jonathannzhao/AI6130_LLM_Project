@@ -1,0 +1,30 @@
+[
+  {
+    "BLEU": 0.6248,
+    "Token-Level Accuracy": 0.08,
+    "SemanticSimilarity": 0.9316,
+    "BERTScoreF1": 0.7774,
+    "METEOR": 0.8044,
+    "BiasRetentionRate": 0.9549,
+    "BiasPhraseRetentionRate": 0.7983,
+    "OverEditRate": 0.118,
+    "NoBiasReductionCount": 26,
+    "n": 50,
+    "model": "haiku",
+    "strategy": "few_shot"
+  },
+  {
+    "BLEU": 0.337,
+    "Token-Level Accuracy": 0.0,
+    "SemanticSimilarity": 0.8708,
+    "BERTScoreF1": 0.5924,
+    "METEOR": 0.6266,
+    "BiasRetentionRate": 0.8889,
+    "BiasPhraseRetentionRate": 0.557,
+    "OverEditRate": 0.3191,
+    "NoBiasReductionCount": 12,
+    "n": 50,
+    "model": "haiku",
+    "strategy": "context_enriched"
+  }
+]

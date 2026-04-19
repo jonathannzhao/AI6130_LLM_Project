@@ -1,0 +1,2 @@
+BLEU,Token-Level Accuracy,SemanticSimilarity,BERTScoreF1,METEOR,BiasRetentionRate,BiasPhraseRetentionRate,OverEditRate,n,model,strategy,NoBiasReductionCount
+0.6087,0.019,0.9315,0.7464,0.8617,0.9736,0.8947,0.0632,2000,meta-llama/llama-3.1-8b-instruct,context_enriched,1144
